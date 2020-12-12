@@ -45,8 +45,12 @@ def compare(t1 : Agent, t2 : Agent, T=10):
     p = p_val(z)
     return (p, mu_z, sigma, res1, res2)
 
-with open(base_path + '/templates/gittins.py', 'r') as f: 
+with open(base_path + '/templates/gittins.py', 'r') as f:
     gittins = f.read()
+    
+
+with open(base_path + '/templates/exact_gittins.py', 'r') as f: 
+    exact_gittins = f.read()
         
 gittins_with_random = gittins.format("{}", "{}", "f += np.random.random(f.shape) * 1e-12")
 gittins_with_count_my = gittins_with_random.format("{}", "gittins -= self._decay * self._successes")
@@ -61,6 +65,9 @@ gittins_with_count_rival_drift = gittins_with_random.format("{}", "gittins += se
 gittins_with_my_and_count_rival_drift = gittins_with_random.format("{}", 
     "gittins += (self._rival_drift * self._rival_moves - self._decay * self._successes)")
 # gittins_with_random_and_custom_params = gittins_with_random.format("beta,p,q=0.5, 0.5, 1", "{}")
+
+exact_gittins_with_my_and_count_rival_drift = gittins_with_random.format("{}", 
+    "gittins += (self._rival_drift * self._rival_moves - self._decay * self._successes)")
 
     
 bb = {
@@ -80,6 +87,9 @@ bb_delta = {
 
 with open(base_path + '/templates/neural.py', 'r') as f:
     neural = f.read()
+    
+neural_with_new_feature = neural.format(
+    "{}\n        input_f += 1", "vectors = np.concatenate([vectors, remap([thompson])[0]], axis=1)")
     
 
 def init_template(tmpl : str, params : dict) -> str:
@@ -105,15 +115,16 @@ def bench(a : Agent) -> list:
         ('gittins_with_my_and_count_rival_drift', Agent(text=gittins_with_my_and_count_rival_drift)),
         ('gittins_bb', Agent(text=gittins_bb)),
         ('gittins_bb_delta', Agent(text=gittins_bb_delta)),
-        ('softmax_ucb', Agent(file=base_path + 'kernels/softmax_ucb.py')),
-        ('multiarmed_bandit_agent', Agent(file=base_path + 'kernels/multiarmed_bandit_agent.py')),
-        ('upper_confidence', Agent(file=base_path + 'kernels/upper_confidence.py')),
-        ('ucb_decay', Agent(file=base_path + 'kernels/ucb_decay.py')),
-        ('bayesian_ucb', Agent(file=base_path + 'kernels/bayesian_ucb.py')),
-        ('thompson', Agent(file=base_path + 'kernels/thompson.py')),
+        ('softmax_ucb', Agent(file=base_path + '/kernels/softmax_ucb.py')),
+        ('multiarmed_bandit_agent', Agent(file=base_path + '/kernels/multiarmed_bandit_agent.py')),
+        ('upper_confidence', Agent(file=base_path + '/kernels/upper_confidence.py')),
+        ('ucb_decay', Agent(file=base_path + '/kernels/ucb_decay.py')),
+        ('bayesian_ucb', Agent(file=base_path + '/kernels/bayesian_ucb.py')),
+        ('thompson', Agent(file=base_path + '/kernels/thompson.py')),
         ('neural', Agent(text=neural)),
 #         ('max_likelihood', Agent(file=path + 'kernels/max_likelihood.py')), works too long
-        ('optimized_ucb', Agent(file=base_path + 'kernels/optimized_ucb.py')),
+        ('optimized_ucb', Agent(file=base_path + '/kernels/optimized_ucb.py')),
+        ('exact_gittins', Agent(text=exact_gittins)),
     ]
     
     res = []

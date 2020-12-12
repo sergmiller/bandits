@@ -37,63 +37,73 @@ class AbstractAgent(metaclass=ABCMeta):
     
 from collections import defaultdict
 
-class GittinsIndexAgent(AbstractAgent):
+class ExactGittinsIndexAgent(AbstractAgent):
     def __init__(self):
-        beta = 0.9
+        alpha = 0.125
+        distortion_horizon = 1.01
+        eps = 0
         p = 1
         q = 1
-        decay = 0.03
-        rival_drift = 0.0001
-        eps = 0
+        decay = 0
+        rival_drift = 0
         {}
-        self.beta = beta
+        self.horizon = 2000 # fixed by game
+        self.distortion_horizon = distortion_horizon
+        self.alpha = alpha
+        self.eps = eps
         self.p = p
         self.q = q
-        self.c = -np.log(self.beta)
-        self.eps = eps
         self._decay = decay
         self._rival_drift = rival_drift
         
     def get_gittins(self):
         '''
-        Whittle's approximation
+        Exact algorithm
         '''
-        p = self.p + self._successes
-        q = self.q + self._failures
+        p = self._successes + self.p
+        q = self._failures + self.q
         n = p + q
-        mu = p / n
         
-        gittins = mu + mu * (1 - mu) / \
-                        (n * np.sqrt((2 * self.c + 1 / n) * mu * (1 - mu)) + mu - 1/2)
-        {}            
+        m = max((self.distortion_horizon * self.horizon) - self._total_pulls + 1, 1)
+        mu = float(m) / n
+
+        gittins = p / n  + np.sqrt((2. * self.alpha) / n * np.log(mu / np.sqrt(np.maximum(1e-9, np.log(mu)))))
+        
+        gittins[n < 1] = float('+inf')
+        
+        {}
+      
         return gittins
+    
+    def update(self, action, reward, rival_move=None):
+        super().update(action, reward, rival_move)
         
     def get_action(self):
         f = self.get_gittins()
         if np.random.random() < self.eps:  # eps greedy
             return np.random.randint(f.shape[0])
-        {}
+        f += np.random.random(f.shape) * 1e-12
         return np.argmax(f)
     
-gittinsAgent = GittinsIndexAgent()
+agent = ExactGittinsIndexAgent()
 last_bandit = None
 total_reward = 0
 sums_of_reward = None
 numbers_of_selections = None
 
-def agent(observation, configuration):
-    global gittinsAgent, last_bandit, total_reward, sums_of_reward, numbers_of_selections
+def exec(observation, configuration):
+    global agent, last_bandit, total_reward, sums_of_reward, numbers_of_selections
 
     if observation.step == 0:
-        gittinsAgent.init_actions(configuration["banditCount"])
+        agent.init_actions(configuration["banditCount"])
 
     if last_bandit is not None:
         reward = observation.reward - total_reward
         total_reward += reward
         rival_id = 1 - observation.agentIndex
         rival_move = observation.lastActions[rival_id]
-        gittinsAgent.update(last_bandit, reward, rival_move)
+        agent.update(last_bandit, reward, rival_move)
 
-    last_bandit = gittinsAgent.get_action()
+    last_bandit = agent.get_action()
     
     return int(last_bandit)

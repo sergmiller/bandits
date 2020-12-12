@@ -44,16 +44,25 @@ from collections import defaultdict
 
 class NeuralAgent(AbstractAgent):
     def __init__(self):
+        # exact gittins params
+        alpha = 0.125
+        distortion_horizon = 1.01
+        # model params
         lr = 1e-3
+        hidden = 128
+        # gittins params
         beta = 0.4613730907562291
-        drift = -0.0011519703027092387
-        eps = 0.04165963371245352
+        # gittins & exact params
         p = 0.5451383211748958
         q = 0.5821590019751394
-        hidden = 128
+        # common bandit params
+        drift = -0.0011519703027092387
+        eps = 0.04165963371245352
         decay = 0.03
+        input_f = 11 + 5 + 5 + 5
         {}
-        self.input_f = 8 + 5 + 5 + 5
+        self.horizon = 2000 # fixed by game
+        self.input_f = input_f
         self.hidden = hidden
         self.out = 1
         self.lr = lr
@@ -63,6 +72,8 @@ class NeuralAgent(AbstractAgent):
             nn.Sigmoid(),
             nn.Linear(self.hidden, self.out)
         )
+        self.alpha = alpha
+        self.distortion_horizon = distortion_horizon
         self.p = p
         self.q = q
         self.beta = beta
@@ -74,8 +85,8 @@ class NeuralAgent(AbstractAgent):
         self.last_prediction = None
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
         self.five_last_moves_queue = []
-
-    def get_action(self):
+    
+    def get_gittins(self):
         p = self.p + self._successes
         q = self.q + self._failures
         n = p + q
@@ -83,8 +94,44 @@ class NeuralAgent(AbstractAgent):
         
         gittins = mu + mu * (1 - mu) / \
                         (n * np.sqrt((2 * self.c + 1 / n) * mu * (1 - mu)) + mu - 1/2)
+        
+        return gittins
+    
+    
+    def get_exact_gittins(self):
+        p = self._successes + self.p
+        q = self._failures + self.q
+        n = p + q
+        
+        m = max((self.distortion_horizon * self.horizon) - self._total_pulls + 1, 1)
+        mu = float(m) / n
+
+        gittins = p / n  + np.sqrt((2. * self.alpha) / n * np.log(mu / np.sqrt(np.maximum(1e-9, np.log(mu)))))
+        
+        gittins[n < 1] = float('+inf')
+      
+        return gittins
+    
+    def add_linear_atoms(self, v):
+        return v + self._rival_drift * self._rival_moves - self._decay * self._successes
+        
+
+    def get_action(self):
+        p = self.p + self._successes
+        q = self.q + self._failures
+        n = p + q
+        mu = p / n
+        
+        gittins = self.get_gittins()
+        exact_gittins = self.get_exact_gittins()
                         
-        gittins += (self._rival_drift * self._rival_moves - self._decay * self._successes)
+        gittins = self.add_linear_atoms(gittins)
+        
+        total_pulls = np.ones_like(p) * self._total_pulls
+        
+        thompson = np.random.beta(p, q)
+        
+        remaining = self.horizon - total_pulls
         
         remap = lambda stream : [x.reshape(-1, 1) for x in stream]
         
@@ -98,8 +145,10 @@ class NeuralAgent(AbstractAgent):
             dense_five_last_my_rewards[e[2]][i] = 1
 
         
-        vectors = np.concatenate(remap((p, q, n, mu, gittins, self._successes, self._failures, self._rival_moves)) +  
+        vectors = np.concatenate(remap((p, q, n, mu, gittins, exact_gittins, total_pulls, remaining, self._successes, self._failures, self._rival_moves)) +  
             [dense_five_last_rival_moves, dense_five_last_my_moves, dense_five_last_my_rewards],axis=1)
+        
+        {}
          
         self.optimizer.zero_grad()
         vectors = torch.Tensor(vectors)
