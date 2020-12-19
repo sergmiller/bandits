@@ -44,7 +44,7 @@ class ExactGittinsIndexAgent(AbstractAgent):
         eps = 0
         p = 1
         q = 1
-        decay = 0
+        decay = 0.03
         rival_drift = 0
         {}
         self.horizon = 2000 # fixed by game

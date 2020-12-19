@@ -28,22 +28,68 @@ def write_to(f_name, text):
     with open(f_name, "w") as f:
         f.write(text)
 
-def compare(t1 : Agent, t2 : Agent, T=10):
+def set_weights_in_sep_nn(a : Agent, weights : dict):
+    import json
+#     print(a.text.find("self.weights_dict_serialized = None"), weights)
+    a.text = a.text.replace(
+        "self.weights_dict_serialized = None",
+        "self.weights_dict_serialized=\"\"\"{}\"\"\"".format(json.dumps(weights)))
+    a.file = None
+#     print(a.text)
+    return a
+
+def compare(t1 : Agent, t2 : Agent, T=10, first_is_sep_nn=False, verbose=False, set_weights_in_sep_nn=set_weights_in_sep_nn):
     init_agent(t1)
     init_agent(t2)
     res1 = np.zeros(T)
     res2 = np.zeros(T)
+    weights = {}
+    from copy import deepcopy
+    t1_orig = deepcopy(t1)
     for i in range(T):
         env = make("mab", debug=True)
+        env.reset()
+        if first_is_sep_nn:
+            t1 = set_weights_in_sep_nn(deepcopy(t1_orig), weights)
+            init_agent(t1)
         res = env.run([t1.file, t2.file])
         res1[i] = res[-1][0]['reward']
         res2[i] = res[-1][1]['reward']
+        if verbose:
+            print(res1[i], res2[i])
+        if first_is_sep_nn:
+            new_weights, err = parse_env_for_weights(env)
+            if err is False:
+                weights = new_weights
+            
     delta = res1 - res2
     mu_z = np.mean(delta)
     sigma = np.std(delta)
     z = mu_z / sigma * T ** 0.5
     p = p_val(z)
-    return (p, mu_z, sigma, res1, res2)
+    win_rate = np.mean(res1 >= res2) 
+    return (p, mu_z, sigma, win_rate, t1.file, t2.file, res1, res2)
+
+def parse_env_for_weights(env):
+    try:
+        res = parse_env_for_weights_impl(env)
+        return res, False
+    except:
+        print('Got error in parse weights')
+        return None, True
+
+def parse_env_for_weights_impl(env):
+    res = {}
+    for s in list(filter(lambda x : x.startswith('layer'),[x[0]['stdout'] for x in env.__dict__['logs'][-25:]])):
+        assert s[-2:] == '$\n'
+        s = s[:-2]
+        s = s.split('_')
+        layer = s[1]
+        var_id = s[2]
+        data = list(map(float, s[3].split(',')))
+        res[layer + '_' + var_id] = data
+
+    return res
 
 with open(base_path + '/templates/gittins.py', 'r') as f:
     gittins = f.read()
@@ -87,9 +133,9 @@ bb_delta = {
 
 with open(base_path + '/templates/neural.py', 'r') as f:
     neural = f.read()
-    
+
 neural_with_new_feature = neural.format(
-    "{}\n        input_f += 1", "vectors = np.concatenate([vectors, remap([thompson])[0]], axis=1)")
+    "{}\n        input_f += 1", "vectors = np.concatenate([vectors, remap([{}])[0]], axis=1)")
     
 
 def init_template(tmpl : str, params : dict) -> str:
