@@ -388,6 +388,7 @@ class NeuralAgent(AbstractAgent):
         
         baseline = gittins
         self.policy_baseline = mu
+        self.vectors = vectors
         {}
 
         vectors = torch.Tensor(vectors)
@@ -421,6 +422,9 @@ class NeuralAgent(AbstractAgent):
                     order += 1
         
         return prediction
+    
+    def get_features_dump(self, action):
+        return self.vectors[action]
     
     def update(self, action, reward, rival_move=None):
         super().update(action, reward, rival_move)
