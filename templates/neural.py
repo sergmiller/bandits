@@ -5,6 +5,46 @@ import torch.optim as optim
 
 from scipy.stats import beta
 
+from scipy import integrate
+
+def pdf(p, weights, rewards, normalization=1):
+    s = 1
+    for weight, reward in zip(weights, rewards):
+        if reward == 1:
+            s *= (weight * p)
+        else:
+            s *= (1 - weight * p)
+    return s / normalization
+
+GLOBAL_CACHE = dict()
+
+def get_expected_mean_std(weights, rewards):
+    global GLOBAL_CACHE
+    key = (tuple(weights), tuple(rewards), 'bayes')
+    if key in GLOBAL_CACHE:
+        return GLOBAL_CACHE[key]
+    normalization = integrate.quad(
+        lambda x: pdf(x, weights, rewards), 0, 1
+    )[0]
+    first_order = integrate.quad(
+        lambda x: x * pdf(x, weights, rewards, normalization), 0, 1
+    )[0]
+    second_order = integrate.quad(
+        lambda x: x * x * pdf(x, weights, rewards, normalization), 0, 1
+    )[0]
+    GLOBAL_CACHE[key] = (first_order, (second_order - first_order ** 2) ** 0.5)
+    return GLOBAL_CACHE[key]
+
+def beta_estimation(_, rewards):
+    global GLOBAL_CACHE
+    key = (tuple(rewards), 'beta')
+    if key in GLOBAL_CACHE:
+        return GLOBAL_CACHE[key]
+    trials = len(rewards)
+    GLOBAL_CACHE[key] = (beta.mean(1 + sum(rewards), trials+1 - sum(rewards)),
+        beta.std(1 + sum(rewards), trials+1 - sum(rewards)))
+    return GLOBAL_CACHE[key]
+
 from abc import ABCMeta, abstractmethod
 
 class AbstractAgent(metaclass=ABCMeta):   
@@ -43,26 +83,6 @@ class AbstractAgent(metaclass=ABCMeta):
     
 from collections import defaultdict
 
-
-class CustomBilinearLayer(nn.Module):
-    def __init__(self, f_in, f_out, inner=1, list_a=None, list_b=None, list_bias=None):
-        super().__init__()
-        if list_a is None:
-            assert list_b is None and list_bias is None
-            list_a = torch.nn.init.xavier_uniform_(torch.empty(f_in, inner))
-            list_b = torch.nn.init.xavier_uniform_(torch.empty(f_out, inner))
-            list_bias = torch.nn.init.normal_(torch.empty(f_out))
-        self.a = self._create_grad_tensor_from_list(list_a).reshape(f_in, inner)
-        self.b = self._create_grad_tensor_from_list(list_b).reshape(f_out, inner)
-        self.bias = self._create_grad_tensor_from_list(list_bias).reshape(f_out)
-        self.a = nn.Parameter(self.a, requires_grad=True)
-        self.b = nn.Parameter(self.b, requires_grad=True)
-        self.bias = nn.Parameter(self.bias, requires_grad=True)
-    def forward(self, x):
-        return torch.matmul(x, torch.matmul(self.a, self.b.T)) + self.bias
-    def _create_grad_tensor_from_list(self, l):
-        a = torch.FloatTensor(l)
-        return a
     
 class CustomLinearLayer(nn.Module):
     def __init__(self, f_in, f_out, list_a=None, list_bias=None):
@@ -99,20 +119,15 @@ class NeuralAgent(AbstractAgent):
         if self.weights_dict_serialized is not None:
             weights = json.loads(self.weights_dict_serialized)
         
-        if len(weights) == 0:
-            self.model = nn.Sequential(
-                nn.Softsign(),
-                CustomLinearLayer(self.input_f, self.hidden),
-                nn.Sigmoid(),
-                CustomLinearLayer(self.hidden, self.out)
-            )
-            return 
         self.model = nn.Sequential(
-                nn.Softsign(),
-                CustomLinearLayer(self.input_f, self.hidden, weights['1_0'], weights['1_1']),
-                nn.Sigmoid(),
-                CustomLinearLayer(self.hidden, self.out, weights['3_0'], weights['3_1'])
+            nn.Softsign(),
+            CustomLinearLayer(self.input_f, self.hidden, weights.get('1_0', None), weights.get('1_1', None)),
+            nn.Sigmoid(),
+            CustomLinearLayer(self.hidden, self.hidden, weights.get('3_0', None), weights.get('3_1', None)),
+            nn.Sigmoid(),
+            CustomLinearLayer(self.hidden, self.out, weights.get('5_0', None), weights.get('5_1', None))
         )
+
         
     def _make_nn_dense(self):
         self.model = nn.Sequential(
@@ -142,7 +157,7 @@ class NeuralAgent(AbstractAgent):
         drift = -0.0011519703027092387
         eps = 0.04165963371245352
         decay = 0.03
-        input_f = 14 + 5 + 5 + 5
+        input_f = 14 + 5 + 5 + 5 + 4 + 3 #- 8 # saved features
         batch_size = 1
         use_reinforce = False
         no_reward = 0.3
@@ -150,8 +165,10 @@ class NeuralAgent(AbstractAgent):
         loss = nn.BCELoss()
         # bayesian
         c = 3
+        not_learn = False
         
         {}
+        self.not_learn = not_learn
         self.use_sep_nn = use_sep_nn
         self.sep_components = sep_components
         self.horizon = 2000 # fixed by game
@@ -184,6 +201,11 @@ class NeuralAgent(AbstractAgent):
         self._no_reward = no_reward
         self.thompson_state = None
         self._make_nn_wrapper()
+        
+        self.discountings_estimation = None
+        self.rewards = None
+        self.prior_enemy = None
+
     
     def get_gittins(self):
         p = self.p + self._successes
@@ -242,6 +264,81 @@ class NeuralAgent(AbstractAgent):
         n = p + q
         bucb = p / n.astype(float) + beta.std(p, q) * self.c
         return bucb
+    
+    def get_custom_ucb_bandits(self):
+        p = self._successes + self.p
+        q = self._failures + self.q
+        n = p + q
+        mu = p / n
+        sigma2 = mu * (1 - mu)
+        C = 1
+        c = 1
+        xi = 1
+        out = np.zeros((n.shape[0], 4))
+        lnt_divide_t_k = np.log(1 + self._total_pulls) / n
+        out[:, 0] = np.sqrt(C * lnt_divide_t_k)
+        out[:, 1] = np.sqrt(lnt_divide_t_k * np.minimum(0.25, np.sqrt(sigma2) + np.sqrt(2 * lnt_divide_t_k)))
+        out[:, 2] = np.sqrt(16 * sigma2 * (1 + 1 / n) * lnt_divide_t_k)
+        out[:, 3] = np.sqrt(2 * sigma2 * xi * lnt_divide_t_k) + c * 3 * xi * lnt_divide_t_k
+        out += mu.reshape(-1, 1)
+        return out
+    
+    
+    def enemy_p_estimate(self, discountings_est, rewards):
+#         return get_expected_mean_std(discountings_est, rewards)[0] * (1 - prior_enemy) + \
+#             beta_estimation(discountings_est, rewards)[0] * prior_enemy
+#         return  beta_estimation(discountings_est, rewards)[0]
+        return get_expected_mean_std(discountings_est, rewards)[0]
+    
+    def make_update_initial_probs_estimations(self, action, reward, rival_move):
+        def up_discount(d, r):
+            if len(d) == 0:
+                d.append(1)
+            else:
+                d.append(d[-1] * (1 - self._decay * r))
+                
+        p_enemy = self.enemy_p_estimate(self.discountings_estimation[rival_move], self.rewards[rival_move])
+        enemy_reward_sample = int(np.random.choice([0, 1], p=(1-p_enemy, p_enemy)))
+        enemy_reward_decay_proxy = (1 - np.exp(np.log(1 - self._decay) * p_enemy)) / self._decay
+
+        self.rewards[action].append(reward)
+        self.rewards[rival_move].append(enemy_reward_sample)
+        
+        up_discount(self.discountings_estimation[action], reward)
+        up_discount(self.discountings_estimation[rival_move], enemy_reward_decay_proxy)
+        
+
+    
+    def get_initial_probs_estimations(self):
+        N = self._successes.shape[0]
+        out = np.zeros((N, 3))
+        
+        if self.discountings_estimation is None:
+            self.discountings_estimation = [[] for _ in range(N)]
+            self.rewards = [[] for _ in range(N)]
+        
+        p = self._successes + self.p
+        q = self._failures + self.q
+        n = p + q
+        prior_enemy = self._rival_moves / (n + self._rival_moves)
+        
+        L = 100
+        
+        def save_wrap(f):
+            def g(*args, **kwargs):
+                try:
+                    return f(*args, **kwargs)
+                except Exception as e:
+                    print('Got exception: ' + str(e))
+                    return (0, 0)  
+            return g
+        
+        for i in range(N):
+            out[i, 0] = save_wrap(get_expected_mean_std)(self.discountings_estimation[i][:L], self.rewards[i][:L])[0]
+            out[i, 1] = save_wrap(beta_estimation)(self.discountings_estimation[i][:L], self.rewards[i][:L])[0]
+        
+        out[:, 2] = out[:, 0] * (1 - prior_enemy) + out[:, 1] * prior_enemy
+        return out
 
     def get_action(self):
         p = self.p + self._successes
@@ -260,9 +357,13 @@ class NeuralAgent(AbstractAgent):
         
         thompson = self.get_thompson()
         
+        custom_ucb_bandits = self.get_custom_ucb_bandits()
+        
         thompson_with_decay = self.get_thompson_with_decay_my_and_rival()
         
         # stats
+        prior_estimations = self.get_initial_probs_estimations()
+        
         total_pulls = np.ones_like(p) * self._total_pulls
         
         remaining = self.horizon - total_pulls
@@ -279,10 +380,11 @@ class NeuralAgent(AbstractAgent):
             dense_five_last_rival_moves[e[0]][i] = 1
             dense_five_last_my_moves[e[1]][i] = 1
             dense_five_last_my_rewards[e[2]][i] = 1
-
         
-        vectors = np.concatenate(remap((p, q, n, mu, gittins, exact_gittins, thompson, thompson_with_decay, total_pulls, remaining, bucb, self._successes, self._failures, self._rival_moves)) +  
-            [dense_five_last_rival_moves, dense_five_last_my_moves, dense_five_last_my_rewards],axis=1)
+        # saved : p, q, n, total_pulls, remaining, self._successes, self._failures, self._rival_moves
+        
+        vectors = np.concatenate(remap((p, q, n, total_pulls, remaining, self._successes, self._failures, self._rival_moves, mu, gittins, exact_gittins, thompson, thompson_with_decay, bucb)) +  
+            [dense_five_last_rival_moves, dense_five_last_my_moves, dense_five_last_my_rewards, custom_ucb_bandits, prior_estimations],axis=1)
         
         baseline = gittins
         self.policy_baseline = mu
@@ -312,17 +414,17 @@ class NeuralAgent(AbstractAgent):
         if self.use_sep_nn and self._total_pulls >= self.horizon - T_PRINT:
             print_f = lambda x : list(x.detach().reshape(-1).numpy())
             order = 0
-            for i in [1,3]:
+            for i in [1,3,5]:
                 for j, x in enumerate([self.frozen[i].a, self.frozen[i].bias]):
                     if self._total_pulls == self.horizon - T_PRINT + order:
-#                         np.set_printoptions(precision=3)
-                        print('layer_' + str(i) + '_' + str(j) + '_' + ','.join(map(lambda x : '%.3f' % x,np.array(print_f(x)))) + '$')
+                        print('layer_' + str(i) + '_' + str(j) + '_' + ','.join(map(lambda x : '%.2f' % x,np.array(print_f(x)))) + '$')
                     order += 1
         
         return prediction
     
     def update(self, action, reward, rival_move=None):
         super().update(action, reward, rival_move)
+        self.make_update_initial_probs_estimations(action, reward, rival_move)
         
         if reward > 0:
             self.thompson_state[action][0] += 1
@@ -358,6 +460,8 @@ class NeuralAgent(AbstractAgent):
                 self.loss_sum = -self.log_policy_sum * self.reward_sum  # policy gradient
                 self.reward_sum = 0
                 self.log_policy_sum = 0
+            if self.not_learn:
+                return
             self.optimizer.zero_grad()
             self.loss_sum.backward() 
             self.optimizer.step()

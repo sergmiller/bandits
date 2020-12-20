@@ -56,7 +56,7 @@ def compare(t1 : Agent, t2 : Agent, T=10, first_is_sep_nn=False, verbose=False, 
         res1[i] = res[-1][0]['reward']
         res2[i] = res[-1][1]['reward']
         if verbose:
-            print(res1[i], res2[i])
+            print(res1[i], res2[i], t1.file, t2.file)
         if first_is_sep_nn:
             new_weights, err = parse_env_for_weights(env)
             if err is False:
@@ -136,6 +136,9 @@ with open(base_path + '/templates/neural.py', 'r') as f:
 
 neural_with_new_feature = neural.format(
     "{}\n        input_f += 1", "vectors = np.concatenate([vectors, remap([{}])[0]], axis=1)")
+
+neural_with_new_feature_vec = neural.format(
+    "{}\n        input_f += {}", "vectors = np.concatenate([vectors, {}], axis=1)")
     
 
 def init_template(tmpl : str, params : dict) -> str:
