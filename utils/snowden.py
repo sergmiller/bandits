@@ -1,5 +1,7 @@
 import numpy as np
 import json
+import os
+import tqdm
 
 import utils.bandits as bandits
 
@@ -11,9 +13,16 @@ class Event:
         self.rival_move = rival_move
         self.thresholds = thresholds
 
+class Dataset:
+    def __init__(self, X, y, sessions):
+        self.X = X
+        self.y = y
+        self.sessions = sessions
+
 class Session:
-    def __init__(self, d : dict):
+    def __init__(self, d : dict, file : str):
         self.d = d
+        self.file = file
         self._validate(self.d)
 
         make_event = lambda x, r: Event(
@@ -31,6 +40,9 @@ class Session:
             total_reward += reward
             self.events.append(make_event(x[0]['observation'], reward))
 
+    def __str__(self):
+        return self.file
+
 
     def _validate(self, d):
         assert 'steps' in d
@@ -47,10 +59,73 @@ class Session:
 def parse_json_session(file : str) -> Session:
     with open(file, 'r') as f:
         j = json.load(f)
-    return Session(j)
+    return Session(j, file)
 
 
-def collect_dataset(agent, s : Session):
+def get_all_nested_sessions_in_dir(dir : str)->list:
+    ffiles = []
+    for root, dirs, files in os.walk(dir):
+        for file in files:
+            if file[-5:] != '.json':
+                continue
+            ffiles.append(os.path.join(root, file))
+    return ffiles
+
+def read_sessions_in_dir(dir : str):
+    files = get_all_nested_sessions_in_dir(dir)
+    print(dir, files)
+    sessions = []
+    for f in files:
+        try:
+            s = parse_json_session(f)
+            sessions.append(s)
+        except Exception as e:
+            print('error while parse session ' + str(f) + ' : ' + str(e))
+            continue
+    return sessions
+
+
+def make_dataset(agent_class, sessions : list):
+    X,Y,S = [],[],[]
+    for s in tqdm.tqdm(sessions):
+        x, y = collect_dataset(agent_class, s)
+        X.append(x)
+        Y.append(y)
+        S.append(s.file)
+
+    F = X[0].shape[-1]
+
+    X = np.array(X).reshape(-1, F)
+    Y = np.array(Y).reshape(-1)
+    S = np.array(S)
+    return Dataset(X,Y,S)
+
+
+def collect_dataset_from_dir(agent_class, dir : str, val_ratio = 0):
+    sessions = read_sessions_in_dir(dir)
+
+    np.random.seed(0)
+    np.random.shuffle(sessions)
+
+    split = int(len(sessions) * val_ratio)
+    val_sessions = sessions[:split]
+    train_sessions = sessions[split:]
+
+    return make_dataset(agent_class, train_sessions), make_dataset(agent_class, val_sessions)
+
+def resample_eq(d, size=None):
+    if size is None:
+        size = int(d.y.shape[0] * np.mean(d.y))
+    print('mean before resampling: {}'.format(np.mean(d.y)))
+    samples_1 = np.random.choice(np.where(d.y)[0], size=size)
+    samples_0 = np.random.choice(np.where(1 - d.y)[0], size=size)
+    X = np.concatenate([d.X[samples_1],d.X[samples_0]], axis=0)
+    y = np.concatenate([d.y[samples_1],d.y[samples_0]], axis=0)
+    print('mean after resampling: {}'.format(np.mean(y)))
+    return Dataset(X,y,None)
+
+
+def collect_dataset(agent_class, s : Session):
     '''
         agent also should provide methods:
             get_action() - to make actions(and some precalcs), result not used
@@ -58,6 +133,8 @@ def collect_dataset(agent, s : Session):
             init_actions(N) - N is number of bandits,
             update(last_action, reward, rival_move) - to make internal update
     '''
+
+    agent = agent_class()
 
     agent.init_actions(100)  # default number of bandits
     X = []

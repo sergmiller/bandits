@@ -100,7 +100,51 @@ class CustomLinearLayer(nn.Module):
     def _create_grad_tensor_from_list(self, l):
         a = torch.FloatTensor(l)
         return a
+    
 
+class NNWithCustomFeatures(nn.Module):
+    def __init__(self, INPUT_F, DROP_P, H):
+        super().__init__()
+        INPUT_F_C = INPUT_F + 2 * INPUT_F
+        self.model_ff =  nn.Sequential(
+            nn.BatchNorm1d(INPUT_F_C),
+            nn.Dropout(DROP_P),
+            nn.Linear(INPUT_F_C, H),
+            nn.Sigmoid(),
+            nn.Dropout(DROP_P),
+            nn.Linear(H, 1)
+        )
+
+    def forward(self, x):
+        lg = torch.log(1 + torch.abs(x))
+        sn = torch.sin(x)
+        input_x = torch.cat([x, lg, sn], axis=1)
+        return self.model_ff(input_x)
+    
+
+import sys
+import os
+
+# sys.path.append("/kaggle_simulations/agent")
+# working_dir = "/kaggle_simulations/agent"
+working_dir = "models"
+model_name = "nagiss_v2"
+
+nagiss_model = NNWithCustomFeatures(36, 0.05, 256) # 72 for models from v4, before were - 36
+nagiss_model.load_state_dict(torch.load(os.path.join(working_dir, model_name)))
+nagiss_model.eval()
+
+def save_wrap(f):
+    def g(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            print('Got exception: ' + str(e))
+            return (0, 0)  
+    return g
+        
+
+L = 45
 
 class NeuralAgent(AbstractAgent):
     def _make_nn_wrapper(self):
@@ -163,11 +207,20 @@ class NeuralAgent(AbstractAgent):
         no_reward = 0.3
         seed = None
         loss = nn.BCELoss()
+
+        use_mean = False
         # bayesian
         c = 3
         not_learn = False
+        use_only_nagiss = False
+        use_feature_nagiss = False
         
         {}
+        if use_mean:
+            input_f *= 2
+        if use_feature_nagiss:
+            input_f += 1
+        self.use_feature_nagiss = use_feature_nagiss
         self.not_learn = not_learn
         self.use_sep_nn = use_sep_nn
         self.sep_components = sep_components
@@ -202,9 +255,13 @@ class NeuralAgent(AbstractAgent):
         self.thompson_state = None
         self._make_nn_wrapper()
         
+        self.use_mean = use_mean
+        
         self.discountings_estimation = None
         self.rewards = None
         self.prior_enemy = None
+        
+        self.use_only_nagiss = use_only_nagiss
 
     
     def get_gittins(self):
@@ -288,7 +345,7 @@ class NeuralAgent(AbstractAgent):
 #         return get_expected_mean_std(discountings_est, rewards)[0] * (1 - prior_enemy) + \
 #             beta_estimation(discountings_est, rewards)[0] * prior_enemy
 #         return  beta_estimation(discountings_est, rewards)[0]
-        return get_expected_mean_std(discountings_est, rewards)[0]
+        return save_wrap(get_expected_mean_std)(discountings_est, rewards)[0]
     
     def make_update_initial_probs_estimations(self, action, reward, rival_move):
         def up_discount(d, r):
@@ -297,7 +354,11 @@ class NeuralAgent(AbstractAgent):
             else:
                 d.append(d[-1] * (1 - self._decay * r))
                 
-        p_enemy = self.enemy_p_estimate(self.discountings_estimation[rival_move], self.rewards[rival_move])
+        p_enemy = self.enemy_p_estimate(self.discountings_estimation[rival_move][:L], self.rewards[rival_move][:L])
+        if p_enemy is None or np.isnan(p_enemy):
+            p_enemy = 0.5
+        else:
+            p_enemy=np.clip(p_enemy, 0, 1)
         enemy_reward_sample = int(np.random.choice([0, 1], p=(1-p_enemy, p_enemy)))
         enemy_reward_decay_proxy = (1 - np.exp(np.log(1 - self._decay) * p_enemy)) / self._decay
 
@@ -321,18 +382,7 @@ class NeuralAgent(AbstractAgent):
         q = self._failures + self.q
         n = p + q
         prior_enemy = self._rival_moves / (n + self._rival_moves)
-        
-        L = 100
-        
-        def save_wrap(f):
-            def g(*args, **kwargs):
-                try:
-                    return f(*args, **kwargs)
-                except Exception as e:
-                    print('Got exception: ' + str(e))
-                    return (0, 0)  
-            return g
-        
+
         for i in range(N):
             out[i, 0] = save_wrap(get_expected_mean_std)(self.discountings_estimation[i][:L], self.rewards[i][:L])[0]
             out[i, 1] = save_wrap(beta_estimation)(self.discountings_estimation[i][:L], self.rewards[i][:L])[0]
@@ -386,12 +436,28 @@ class NeuralAgent(AbstractAgent):
         vectors = np.concatenate(remap((p, q, n, total_pulls, remaining, self._successes, self._failures, self._rival_moves, mu, gittins, exact_gittins, thompson, thompson_with_decay, bucb)) +  
             [dense_five_last_rival_moves, dense_five_last_my_moves, dense_five_last_my_rewards, custom_ucb_bandits, prior_estimations],axis=1)
         
+        vectors_mean = np.mean(vectors, axis=0, keepdims=True)
+        vectors_mean = np.repeat(vectors_mean, vectors.shape[0],axis=0)
+        if self.use_mean:
+            vectors = np.concatenate([vectors, vectors - vectors_mean], axis=1)
+        
         baseline = gittins
         self.policy_baseline = mu
         self.vectors = vectors
         {}
 
         vectors = torch.Tensor(vectors)
+        
+        if self.use_feature_nagiss:
+            f = nagiss_model(vectors)
+            vectors = torch.cat([vectors, f], dim=1)
+        
+        if self.use_only_nagiss:
+            out = nagiss_model(vectors)
+            out += torch.rand(out.shape) * 1e-12  # random
+            prediction = torch.argmax(out, dim=0)
+            return prediction
+
         out = self.model(vectors)
         out += torch.Tensor(baseline).reshape(out.shape) # baseline
         out += torch.rand(out.shape) * 1e-12  # random
@@ -442,6 +508,9 @@ class NeuralAgent(AbstractAgent):
         if len(self.five_last_moves_queue) >= 5:
             self.five_last_moves_queue = self.five_last_moves_queue[1:]
         self.five_last_moves_queue.append([rival_move, action, reward])
+        
+        if self.use_only_nagiss:
+            return
         
         if self.use_reinforce:
             act_policy = torch.nn.Softmax(dim=0)(self.last_out)[action]
