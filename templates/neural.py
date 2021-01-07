@@ -53,6 +53,7 @@ class AbstractAgent(metaclass=ABCMeta):
         self._failures = np.zeros(n_actions)
         self._rival_moves = np.zeros(n_actions)
         self._total_pulls = 0
+        self._total_rewards = 0
     
     @abstractmethod
     def get_action(self):
@@ -71,6 +72,7 @@ class AbstractAgent(metaclass=ABCMeta):
         self._total_pulls += 1
         if reward > 0:
             self._successes[action] += 1
+            self._total_rewards += 1
         else:
             self._failures[action] += 1
             
@@ -120,6 +122,173 @@ class NNWithCustomFeatures(nn.Module):
         sn = torch.sin(x)
         input_x = torch.cat([x, lg, sn], axis=1)
         return self.model_ff(input_x)
+
+
+class NNWithCusomFeatures2(nn.Module):
+    def __init__(self, INPUT_F, DROP_P, H):
+        super().__init__()
+        INPUT_F_C = INPUT_F + 2 * INPUT_F
+        self.model_ff =  nn.Sequential(
+            nn.BatchNorm1d(INPUT_F_C),
+            nn.Dropout(DROP_P),
+            nn.Linear(INPUT_F_C, H),
+            nn.Sigmoid(),
+            nn.Linear(H, H),
+            nn.Sigmoid(),
+            nn.Dropout(DROP_P),
+            nn.Linear(H, 1)
+#             nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        lg = torch.log(1 + torch.abs(x))
+        sn = torch.sin(x)
+        input_x = torch.cat([x, lg, sn], axis=1)
+        return self.model_ff(input_x)
+    
+
+class Attention(nn.Module):
+    """ Applies attention mechanism on the `context` using the `query`.
+
+    **Thank you** to IBM for their initial implementation of :class:`Attention`. Here is
+    their `License
+    <https://github.com/IBM/pytorch-seq2seq/blob/master/LICENSE>`__.
+
+    Args:
+        dimensions (int): Dimensionality of the query and context.
+        attention_type (str, optional): How to compute the attention score:
+
+            * dot: :math:`score(H_j,q) = H_j^T q`
+            * general: :math:`score(H_j, q) = H_j^T W_a q`
+
+    Example:
+
+         >>> attention = Attention(256)
+         >>> query = torch.randn(5, 1, 256)
+         >>> context = torch.randn(5, 5, 256)
+         >>> output, weights = attention(query, context)
+         >>> output.size()
+         torch.Size([5, 1, 256])
+         >>> weights.size()
+         torch.Size([5, 1, 5])
+    """
+
+    def __init__(self, dimensions, attention_type='general'):
+        super(Attention, self).__init__()
+
+        if attention_type not in ['dot', 'general']:
+            raise ValueError('Invalid attention type selected.')
+
+        self.attention_type = attention_type
+        if self.attention_type == 'general':
+            self.linear_in = nn.Linear(dimensions, dimensions, bias=False)
+
+        self.linear_out = nn.Linear(dimensions * 2, dimensions, bias=False)
+        self.softmax = nn.Softmax(dim=-1)
+        self.tanh = nn.Tanh()
+
+    def forward(self, query, context):
+        """
+        Args:
+            query (:class:`torch.FloatTensor` [batch size, output length, dimensions]): Sequence of
+                queries to query the context.
+            context (:class:`torch.FloatTensor` [batch size, query length, dimensions]): Data
+                overwhich to apply the attention mechanism.
+
+        Returns:
+            :class:`tuple` with `output` and `weights`:
+            * **output** (:class:`torch.LongTensor` [batch size, output length, dimensions]):
+              Tensor containing the attended features.
+            * **weights** (:class:`torch.FloatTensor` [batch size, output length, query length]):
+              Tensor containing attention weights.
+        """
+        batch_size, output_len, dimensions = query.size()
+        query_len = context.size(1)
+
+        if self.attention_type == "general":
+            query = query.reshape(batch_size * output_len, dimensions)
+            query = self.linear_in(query)
+            query = query.reshape(batch_size, output_len, dimensions)
+
+        # TODO: Include mask on PADDING_INDEX?
+
+        # (batch_size, output_len, dimensions) * (batch_size, query_len, dimensions) ->
+        # (batch_size, output_len, query_len)
+        attention_scores = torch.bmm(query, context.transpose(1, 2).contiguous())
+
+        # Compute weights across every context sequence
+        attention_scores = attention_scores.view(batch_size * output_len, query_len)
+        attention_weights = self.softmax(attention_scores)
+        attention_weights = attention_weights.view(batch_size, output_len, query_len)
+
+        # (batch_size, output_len, query_len) * (batch_size, query_len, dimensions) ->
+        # (batch_size, output_len, dimensions)
+        mix = torch.bmm(attention_weights, context)
+
+        # concat -> (batch_size * output_len, 2*dimensions)
+        combined = torch.cat((mix, query), dim=2)
+        combined = combined.view(batch_size * output_len, 2 * dimensions)
+
+        # Apply linear_out on every 2nd dimension of concat
+        # output -> (batch_size, output_len, dimensions)
+        output = self.linear_out(combined).view(batch_size, output_len, dimensions)
+        output = self.tanh(output)
+
+        return output, attention_weights
+    
+class NNWithAttention(nn.Module):
+    def __init__(self, INPUT_F, DROP_P, H):
+        super().__init__()
+        self.H = H
+        self.O = 100
+        INPUT_F_C = INPUT_F + 2 * INPUT_F
+        self.model_ff_1 =  nn.Sequential(
+            nn.BatchNorm1d(INPUT_F_C),
+            nn.Dropout(DROP_P),
+            nn.Linear(INPUT_F_C, H),
+            nn.Sigmoid(),
+            nn.Linear(H, H),
+#             nn.Sigmoid(),
+#             nn.Dropout(DROP_P),
+#             nn.Linear(H, 1)
+#             nn.Sigmoid()
+        )
+        
+        self.attn = Attention(self.H, attention_type='general')
+        
+        self.model_ff_2 =  nn.Sequential(
+            nn.Linear(H, H),
+            nn.Sigmoid(),
+            nn.Dropout(DROP_P),
+            nn.Linear(H, 1),
+#             nn.Sigmoid(),
+#             nn.Dropout(DROP_P),
+#             nn.Linear(H, 1)
+#             nn.Sigmoid()
+        )
+        
+    def make_features(self, x):
+        x = x[:, :36]   # v9
+        lg = torch.log(1 + torch.abs(x))
+        sn = torch.sin(x)
+        input_x = torch.cat([x, lg, sn], axis=1)
+        return input_x
+
+    def forward(self, x):
+        x = self.make_features(x)
+        query = self.model_ff_1(x)
+        hidden = torch.reshape(query, (-1, self.O, self.H))
+        B = hidden.shape[0]
+        b_ones = torch.ones((self.O, self.O))
+#         mask = torch.block_diag([b_ones for _ in np.arange(B)])
+        mask = 1
+#         print(query.shape, hidden.shape)
+#         assert False
+        weighted_query, weights = self.attn(hidden, hidden)
+        weighted_query = torch.reshape(weighted_query, (-1, self.H))
+        out = self.model_ff_2(weighted_query)
+#         print(query.shape, hidden.shape, weighted_query.shape, weights.shape, out.shape)
+        return out
     
 
 import sys
@@ -128,9 +297,10 @@ import os
 # sys.path.append("/kaggle_simulations/agent")
 # working_dir = "/kaggle_simulations/agent"
 working_dir = "models"
-model_name = "nagiss_v2"
+model_name = "nagiss_v22"
 
-nagiss_model = NNWithCustomFeatures(36, 0.05, 256) # 72 for models from v4, before were - 36
+nagiss_model =  NNWithCusomFeatures2(36, 0.1, 256) # 72 for models from v4, before were - 36
+# nagiss_model =  NNWithAttention(36, 0.5, 256)
 nagiss_model.load_state_dict(torch.load(os.path.join(working_dir, model_name)))
 nagiss_model.eval()
 
@@ -250,6 +420,9 @@ class NeuralAgent(AbstractAgent):
         self.loss_sum = 0
         self.log_policy_sum = 0
         self.reward_sum = 0
+        
+        self.n_actions = 100  # fixed by game
+        
         self.batch_size = batch_size
         self._no_reward = no_reward
         self.thompson_state = None
@@ -262,6 +435,20 @@ class NeuralAgent(AbstractAgent):
         self.prior_enemy = None
         
         self.use_only_nagiss = use_only_nagiss
+        
+        self.v_last_reward = 0
+        self.v_my_action_list = []
+        self.v_op_action_list = []
+        self.v_op_continue_cnt_dict = defaultdict(int)
+        self.v_bandit_dict = dict()
+        for i in range(self.n_actions):
+            d = dict()
+            d['win'] = 1
+            d['loss'] = 0
+            d['opp'] = 0
+            d['my_continue'] = 0
+            d['op_continue'] = 0
+            self.v_bandit_dict[i] = d
 
     
     def get_gittins(self):
@@ -389,6 +576,75 @@ class NeuralAgent(AbstractAgent):
         
         out[:, 2] = out[:, 0] * (1 - prior_enemy) + out[:, 1] * prior_enemy
         return out
+    
+    def get_vegas_raw_dist(self):
+        import math
+        dist = np.zeros(self.n_actions)
+        for bnd in self.v_bandit_dict:
+            dist[bnd] = (self.v_bandit_dict[bnd]['win'] - self.v_bandit_dict[bnd]['loss'] + self.v_bandit_dict[bnd]['opp'] - (self.v_bandit_dict[bnd]['opp']>0)*1.5 + self.v_bandit_dict[bnd]['op_continue']) \
+                     / (self.v_bandit_dict[bnd]['win'] + self.v_bandit_dict[bnd]['loss'] + self.v_bandit_dict[bnd]['opp']) \
+                    * math.pow(0.97, self.v_bandit_dict[bnd]['win'] + self.v_bandit_dict[bnd]['loss'] + self.v_bandit_dict[bnd]['opp'])
+        return dist
+    
+    
+    def update_vegas(self, action, reward, rival_move):
+        last_reward = reward
+
+        my_last_action = action
+        op_last_action = rival_move
+
+        self.v_last_reward = last_reward
+        self.v_my_last_action = my_last_action
+
+        self.v_my_action_list.append(my_last_action)
+        self.v_op_action_list.append(op_last_action)
+
+        if 0 < last_reward:
+            self.v_bandit_dict[my_last_action]['win'] = self.v_bandit_dict[my_last_action]['win'] +1
+        else:
+            self.v_bandit_dict[my_last_action]['loss'] = self.v_bandit_dict[my_last_action]['loss'] +1
+        self.v_bandit_dict[op_last_action]['opp'] = self.v_bandit_dict[op_last_action]['opp'] +1
+
+        if self._total_pulls >= 3:
+            if self.v_my_action_list[-1] == self.v_my_action_list[-2]:
+                self.v_bandit_dict[my_last_action]['my_continue'] += 1
+            else:
+                self.v_bandit_dict[my_last_action]['my_continue'] = 0
+            if self.v_op_action_list[-1] == self.v_op_action_list[-2]:
+                self.v_bandit_dict[op_last_action]['op_continue'] += 1
+            else:
+                self.v_bandit_dict[op_last_action]['op_continue'] = 0
+                
+        
+    
+    def get_vegas_state(self):
+        return self.get_vegas_raw_dist()
+        
+        def make_dist(v):
+            binary = np.zeros(self.n_actions,dtype=float)
+            binary[v] = 1.0
+            return binary
+        
+        import random
+
+        my_pull = make_dist(random.randrange(self.n_actions))
+
+        if self.v_last_reward > 0:
+            my_pull = make_dist(self.v_my_last_action)
+        else:
+            if self._total_pulls >= 4:
+                if (self.v_my_action_list[-1] == self.v_my_action_list[-2]) and (self.v_my_action_list[-1] == self.v_my_action_list[-3]):
+                    if random.random() < 0.5:
+                        my_pull = make_dist(self.v_my_action_list[-1])
+                    else:
+                        my_pull = self.get_vegas_raw_dist()
+                else:
+                    my_pull = self.get_vegas_raw_dist()
+            else:
+                my_pull = self.get_vegas_raw_dist()
+
+        return my_pull
+
 
     def get_action(self):
         p = self.p + self._successes
@@ -410,6 +666,8 @@ class NeuralAgent(AbstractAgent):
         custom_ucb_bandits = self.get_custom_ucb_bandits()
         
         thompson_with_decay = self.get_thompson_with_decay_my_and_rival()
+        
+        vegas = self.get_vegas_state()
         
         # stats
         prior_estimations = self.get_initial_probs_estimations()
@@ -433,7 +691,22 @@ class NeuralAgent(AbstractAgent):
         
         # saved : p, q, n, total_pulls, remaining, self._successes, self._failures, self._rival_moves
         
-        vectors = np.concatenate(remap((p, q, n, total_pulls, remaining, self._successes, self._failures, self._rival_moves, mu, gittins, exact_gittins, thompson, thompson_with_decay, bucb)) +  
+        vectors = np.concatenate(remap((
+            p,
+            q,
+            n,
+            total_pulls,
+            remaining,
+            self._successes,
+            self._failures,
+            self._rival_moves,
+            mu,
+            gittins,
+            exact_gittins,
+            thompson,
+            thompson_with_decay,
+            bucb
+        )) +  
             [dense_five_last_rival_moves, dense_five_last_my_moves, dense_five_last_my_rewards, custom_ucb_bandits, prior_estimations],axis=1)
         
         vectors_mean = np.mean(vectors, axis=0, keepdims=True)
@@ -455,7 +728,8 @@ class NeuralAgent(AbstractAgent):
         if self.use_only_nagiss:
             out = nagiss_model(vectors)
             out += torch.rand(out.shape) * 1e-12  # random
-            prediction = torch.argmax(out, dim=0)
+            probs = torch.nn.Softmax(dim=0)(out).detach().numpy().reshape(-1)
+            prediction = np.random.choice(np.arange(probs.shape[0]), 1, p=probs)[0]
             return prediction
 
         out = self.model(vectors)
@@ -490,10 +764,12 @@ class NeuralAgent(AbstractAgent):
         return prediction
     
     def get_features_dump(self, action):
-        return self.vectors[action]
+        return self.vectors.reshape(-1)
+#         return self.vectors[action]
     
     def update(self, action, reward, rival_move=None):
         super().update(action, reward, rival_move)
+        self.update_vegas(action, reward, rival_move)
         self.make_update_initial_probs_estimations(action, reward, rival_move)
         
         if reward > 0:
@@ -560,6 +836,6 @@ def exec(observation, configuration):
         rival_move = observation.lastActions[rival_id]
         agent.update(last_bandit, reward, rival_move)
 
-    last_bandit = agent.get_action()
+    last_bandit = int(agent.get_action())
     
-    return int(last_bandit)
+    return last_bandit

@@ -14,10 +14,23 @@ class Event:
         self.thresholds = thresholds
 
 class Dataset:
-    def __init__(self, X, y, sessions):
+    def __init__(self, X, y, sessions,actions=None):
         self.X = X
         self.y = y
+        self.actions=actions
         self.sessions = sessions
+    def save_dataset(self, file : str):
+        r = dict()
+        r['X'] = self.X
+        r['y'] = self.y
+        r['sessions'] = self.sessions
+        r['actions'] = self.actions
+        np.save(file, r)
+
+    @classmethod
+    def load_dataset(cls, file : str):
+        r = np.load(file, allow_pickle=True).item()
+        return cls(r['X'], r['y'], r['sessions'], r.get('actions', None))
 
 class Session:
     def __init__(self, d : dict, file : str):
@@ -85,23 +98,30 @@ def read_sessions_in_dir(dir : str):
     return sessions
 
 
-def make_dataset(agent_class, sessions : list):
-    X,Y,S = [],[],[]
-    for s in tqdm.tqdm(sessions):
-        x, y = collect_dataset(agent_class, s)
+def make_dataset(agent_class, sessions : list, n_jobs = 1):
+    from joblib import Parallel, delayed
+
+    with Parallel(n_jobs=n_jobs) as parallel:
+        res = parallel(delayed(collect_dataset)(agent_class, s) for s in tqdm.tqdm(sessions))
+
+    X,Y,S,A = [],[],[],[]
+    for s,r in zip(sessions,res):
+        x,y,a = r
         X.append(x)
         Y.append(y)
         S.append(s.file)
+        A.append(a)
 
     F = X[0].shape[-1]
 
     X = np.array(X).reshape(-1, F)
     Y = np.array(Y).reshape(-1)
     S = np.array(S)
-    return Dataset(X,Y,S)
+    A = np.array(A)
+    return Dataset(X,Y,S,A)
 
 
-def collect_dataset_from_dir(agent_class, dir : str, val_ratio = 0):
+def collect_dataset_from_dir(agent_class, dir : str, val_ratio = 0, n_jobs=1):
     sessions = read_sessions_in_dir(dir)
 
     np.random.seed(0)
@@ -111,7 +131,9 @@ def collect_dataset_from_dir(agent_class, dir : str, val_ratio = 0):
     val_sessions = sessions[:split]
     train_sessions = sessions[split:]
 
-    return make_dataset(agent_class, train_sessions), make_dataset(agent_class, val_sessions)
+    t = make_dataset(agent_class, train_sessions, n_jobs)
+    v = make_dataset(agent_class, val_sessions, n_jobs)
+    return t, v
 
 def resample_eq(d, size=None):
     if size is None:
@@ -139,13 +161,16 @@ def collect_dataset(agent_class, s : Session):
     agent.init_actions(100)  # default number of bandits
     X = []
     y = []
+    a = []
 
     for e in s.events:
         agent.get_action()
         f = agent.get_features_dump(e.action)
         agent.update(e.action, e.reward, e.rival_move)
+        a.append(e.action)
         X.append(f)
         y.append(e.reward)
     X = np.array(X)
     y = np.array(y)
-    return (X,y)
+    a = np.array(a)
+    return (X,y,a)
