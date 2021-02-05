@@ -47,14 +47,14 @@ def beta_estimation(_, rewards):
 
 from abc import ABCMeta, abstractmethod
 
-class AbstractAgent(metaclass=ABCMeta):   
+class AbstractAgent(metaclass=ABCMeta):
     def init_actions(self, n_actions):
         self._successes = np.zeros(n_actions)
         self._failures = np.zeros(n_actions)
         self._rival_moves = np.zeros(n_actions)
         self._total_pulls = 0
         self._total_rewards = 0
-    
+
     @abstractmethod
     def get_action(self):
         '''
@@ -62,7 +62,7 @@ class AbstractAgent(metaclass=ABCMeta):
         :rtype: int
         '''
         pass
-    
+
     def update(self, action, reward, rival_move=None):
         '''
         Observe reward from action and update agent's internal parameters
@@ -75,17 +75,17 @@ class AbstractAgent(metaclass=ABCMeta):
             self._total_rewards += 1
         else:
             self._failures[action] += 1
-            
+
         if rival_move is not None:
             self._rival_moves[rival_move] += 1
-    
+
     @property
     def name(self):
         return self.__class__.__name__
-    
+
 from collections import defaultdict
 
-    
+
 class CustomLinearLayer(nn.Module):
     def __init__(self, f_in, f_out, list_a=None, list_bias=None):
         super().__init__()
@@ -102,7 +102,7 @@ class CustomLinearLayer(nn.Module):
     def _create_grad_tensor_from_list(self, l):
         a = torch.FloatTensor(l)
         return a
-    
+
 
 class NNWithCustomFeatures(nn.Module):
     def __init__(self, INPUT_F, DROP_P, H):
@@ -145,7 +145,7 @@ class NNWithCusomFeatures2(nn.Module):
         sn = torch.sin(x)
         input_x = torch.cat([x, lg, sn], axis=1)
         return self.model_ff(input_x)
-    
+
 
 class Attention(nn.Module):
     """ Applies attention mechanism on the `context` using the `query`.
@@ -173,7 +173,7 @@ class Attention(nn.Module):
          torch.Size([5, 1, 5])
     """
 
-    def __init__(self, dimensions, attention_type='general'):
+    def __init__(self, dimensions, attention_type='general', bias=False):
         super(Attention, self).__init__()
 
         if attention_type not in ['dot', 'general']:
@@ -181,9 +181,9 @@ class Attention(nn.Module):
 
         self.attention_type = attention_type
         if self.attention_type == 'general':
-            self.linear_in = nn.Linear(dimensions, dimensions, bias=False)
+            self.linear_in = nn.Linear(dimensions, dimensions, bias=bias)
 
-        self.linear_out = nn.Linear(dimensions * 2, dimensions, bias=False)
+        self.linear_out = nn.Linear(dimensions * 2, dimensions, bias=bias)
         self.softmax = nn.Softmax(dim=-1)
         self.tanh = nn.Tanh()
 
@@ -235,9 +235,9 @@ class Attention(nn.Module):
         output = self.tanh(output)
 
         return output, attention_weights
-    
+
 class NNWithAttention(nn.Module):
-    def __init__(self, INPUT_F, DROP_P, H):
+    def __init__(self, INPUT_F, DROP_P, H, bias=True):
         super().__init__()
         self.H = H
         self.O = 100
@@ -253,9 +253,9 @@ class NNWithAttention(nn.Module):
 #             nn.Linear(H, 1)
 #             nn.Sigmoid()
         )
-        
-        self.attn = Attention(self.H, attention_type='general')
-        
+
+        self.attn = Attention(self.H, attention_type='general', bias=bias)
+
         self.model_ff_2 =  nn.Sequential(
             nn.Linear(H, H),
             nn.Sigmoid(),
@@ -266,9 +266,9 @@ class NNWithAttention(nn.Module):
 #             nn.Linear(H, 1)
 #             nn.Sigmoid()
         )
-        
+
     def make_features(self, x):
-        x = x[:, :36]   # v9
+#         x = x[:, :36]   # v9
         lg = torch.log(1 + torch.abs(x))
         sn = torch.sin(x)
         input_x = torch.cat([x, lg, sn], axis=1)
@@ -289,7 +289,18 @@ class NNWithAttention(nn.Module):
         out = self.model_ff_2(weighted_query)
 #         print(query.shape, hidden.shape, weighted_query.shape, weights.shape, out.shape)
         return out
-    
+
+class WeightedModel(nn.Module):
+    def __init__(self, models, weights):
+        super().__init__()
+        self.models = models
+        self.weights = weights
+    def forward(self, x):
+        y = 0
+        for w,m in zip(self.weights, self.models):
+            y += w * m(x)
+        return y
+
 
 import sys
 import os
@@ -297,12 +308,31 @@ import os
 # sys.path.append("/kaggle_simulations/agent")
 # working_dir = "/kaggle_simulations/agent"
 working_dir = "models"
-model_name = "nagiss_v22"
+# model_name = "nagiss_v29"
 
-nagiss_model =  NNWithCusomFeatures2(36, 0.1, 256) # 72 for models from v4, before were - 36
-# nagiss_model =  NNWithAttention(36, 0.5, 256)
-nagiss_model.load_state_dict(torch.load(os.path.join(working_dir, model_name)))
-nagiss_model.eval()
+# nagiss_model =  NNWithCusomFeatures2(36, 0.1, 256) # 72 for models from v4, before were - 36
+# nagiss_model =  NNWithAttention(37, 0.9, 256, False)
+# nagiss_model.load_state_dict(torch.load(os.path.join(working_dir, model_name)))
+# nagiss_model.eval()
+m1 = NNWithAttention(37, 0.9, 256, False)
+m1.load_state_dict(torch.load(os.path.join(working_dir, "nagiss_v24")))
+m1.eval()
+
+m2 = NNWithAttention(37, 0.9, 256, True)
+m2.load_state_dict(torch.load(os.path.join(working_dir, "nagiss_v25")))
+m2.eval()
+
+m3 = NNWithAttention(37, 0.9, 256, False)
+m3.load_state_dict(torch.load(os.path.join(working_dir, "nagiss_v30")))
+m3.eval()
+
+nagiss_model = WeightedModel([m1, m2, m3], [1/3, 1/3, 1/3])
+
+# import catboost
+# cbmodel = catboost.CatBoost()
+
+cbmodel_name = 'cbmodel_v2'
+# cbmodel.load_model(os.path.join(working_dir, cbmodel_name))
 
 def save_wrap(f):
     def g(*args, **kwargs):
@@ -310,9 +340,9 @@ def save_wrap(f):
             return f(*args, **kwargs)
         except Exception as e:
             print('Got exception: ' + str(e))
-            return (0, 0)  
+            return (0, 0)
     return g
-        
+
 
 L = 45
 
@@ -326,13 +356,13 @@ class NeuralAgent(AbstractAgent):
         else:
             self._make_nn_dense()
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-    
+
     def _make_nn_sep(self):
         import json
         weights = dict()
         if self.weights_dict_serialized is not None:
             weights = json.loads(self.weights_dict_serialized)
-        
+
         self.model = nn.Sequential(
             nn.Softsign(),
             CustomLinearLayer(self.input_f, self.hidden, weights.get('1_0', None), weights.get('1_1', None)),
@@ -342,7 +372,7 @@ class NeuralAgent(AbstractAgent):
             CustomLinearLayer(self.hidden, self.out, weights.get('5_0', None), weights.get('5_1', None))
         )
 
-        
+
     def _make_nn_dense(self):
         self.model = nn.Sequential(
             nn.Softsign(),
@@ -350,7 +380,7 @@ class NeuralAgent(AbstractAgent):
             nn.Sigmoid(),
             nn.Linear(self.hidden, self.out)
         )
-    
+
     def __init__(self):
         # exact gittins params
         alpha = 0.125
@@ -371,7 +401,7 @@ class NeuralAgent(AbstractAgent):
         drift = -0.0011519703027092387
         eps = 0.04165963371245352
         decay = 0.03
-        input_f = 14 + 5 + 5 + 5 + 4 + 3 #- 8 # saved features
+        input_f = 14 + 5 + 5 + 5 + 4 + 3 + 1 #- 8 # saved features
         batch_size = 1
         use_reinforce = False
         no_reward = 0.3
@@ -383,13 +413,18 @@ class NeuralAgent(AbstractAgent):
         c = 3
         not_learn = False
         use_only_nagiss = False
+        use_baseline_nagiss = False
         use_feature_nagiss = False
-        
+
+        use_catboost = False
+
         {}
         if use_mean:
             input_f *= 2
         if use_feature_nagiss:
             input_f += 1
+
+        self.use_catboost = use_catboost
         self.use_feature_nagiss = use_feature_nagiss
         self.not_learn = not_learn
         self.use_sep_nn = use_sep_nn
@@ -420,22 +455,23 @@ class NeuralAgent(AbstractAgent):
         self.loss_sum = 0
         self.log_policy_sum = 0
         self.reward_sum = 0
-        
+
         self.n_actions = 100  # fixed by game
-        
+
         self.batch_size = batch_size
         self._no_reward = no_reward
         self.thompson_state = None
         self._make_nn_wrapper()
-        
+
         self.use_mean = use_mean
-        
+
         self.discountings_estimation = None
         self.rewards = None
         self.prior_enemy = None
-        
+
         self.use_only_nagiss = use_only_nagiss
-        
+        self.use_baseline_nagiss = use_baseline_nagiss
+
         self.v_last_reward = 0
         self.v_my_action_list = []
         self.v_op_action_list = []
@@ -450,32 +486,32 @@ class NeuralAgent(AbstractAgent):
             d['op_continue'] = 0
             self.v_bandit_dict[i] = d
 
-    
+
     def get_gittins(self):
         p = self.p + self._successes
         q = self.q + self._failures
         n = p + q
         mu = p / n
-        
+
         gittins = mu + mu * (1 - mu) / \
                         (n * np.sqrt((2 * self.c + 1 / n) * mu * (1 - mu)) + mu - 1/2)
-        
+
         return gittins
-    
-    
+
+
     def get_thompson(self):
         p = self.p + self._successes
         q = self.q + self._failures
-        
+
         thompson = np.random.beta(p, q)
-        
+
         return thompson
-    
-    
-    def get_thompson_with_decay_my_and_rival(self):        
+
+
+    def get_thompson_with_decay_my_and_rival(self):
         if self.thompson_state is None:
             self.thompson_state = np.ones((self._successes.shape[0], 2))
-        
+
         best_proba = -1
         best_agent = None
         probs = np.zeros_like(self._successes)
@@ -483,32 +519,32 @@ class NeuralAgent(AbstractAgent):
             probs[k] = np.random.beta(self.thompson_state[k][0], self.thompson_state[k][1])
 
         return probs
-    
-    
+
+
     def get_exact_gittins(self):
         p = self._successes + self.p
         q = self._failures + self.q
         n = p + q
-        
+
         m = max((self.distortion_horizon * self.horizon) - self._total_pulls + 1, 1)
         mu = float(m) / n
 
         gittins = p / n  + np.sqrt((2. * self.alpha) / n * np.log(mu / np.sqrt(np.maximum(1e-9, np.log(mu)))))
-        
+
         gittins[n < 1] = float('+inf')
-      
+
         return gittins
-    
+
     def add_linear_atoms(self, v):
         return v + self._rival_drift * self._rival_moves - self._decay * self._successes
-    
+
     def get_bayesian_ucb(self):
         p = self._successes + self.p
         q = self._failures + self.q
         n = p + q
         bucb = p / n.astype(float) + beta.std(p, q) * self.c
         return bucb
-    
+
     def get_custom_ucb_bandits(self):
         p = self._successes + self.p
         q = self._failures + self.q
@@ -526,21 +562,21 @@ class NeuralAgent(AbstractAgent):
         out[:, 3] = np.sqrt(2 * sigma2 * xi * lnt_divide_t_k) + c * 3 * xi * lnt_divide_t_k
         out += mu.reshape(-1, 1)
         return out
-    
-    
+
+
     def enemy_p_estimate(self, discountings_est, rewards):
 #         return get_expected_mean_std(discountings_est, rewards)[0] * (1 - prior_enemy) + \
 #             beta_estimation(discountings_est, rewards)[0] * prior_enemy
 #         return  beta_estimation(discountings_est, rewards)[0]
         return save_wrap(get_expected_mean_std)(discountings_est, rewards)[0]
-    
+
     def make_update_initial_probs_estimations(self, action, reward, rival_move):
         def up_discount(d, r):
             if len(d) == 0:
                 d.append(1)
             else:
                 d.append(d[-1] * (1 - self._decay * r))
-                
+
         p_enemy = self.enemy_p_estimate(self.discountings_estimation[rival_move][:L], self.rewards[rival_move][:L])
         if p_enemy is None or np.isnan(p_enemy):
             p_enemy = 0.5
@@ -551,20 +587,20 @@ class NeuralAgent(AbstractAgent):
 
         self.rewards[action].append(reward)
         self.rewards[rival_move].append(enemy_reward_sample)
-        
+
         up_discount(self.discountings_estimation[action], reward)
         up_discount(self.discountings_estimation[rival_move], enemy_reward_decay_proxy)
-        
 
-    
+
+
     def get_initial_probs_estimations(self):
         N = self._successes.shape[0]
         out = np.zeros((N, 3))
-        
+
         if self.discountings_estimation is None:
             self.discountings_estimation = [[] for _ in range(N)]
             self.rewards = [[] for _ in range(N)]
-        
+
         p = self._successes + self.p
         q = self._failures + self.q
         n = p + q
@@ -573,10 +609,10 @@ class NeuralAgent(AbstractAgent):
         for i in range(N):
             out[i, 0] = save_wrap(get_expected_mean_std)(self.discountings_estimation[i][:L], self.rewards[i][:L])[0]
             out[i, 1] = save_wrap(beta_estimation)(self.discountings_estimation[i][:L], self.rewards[i][:L])[0]
-        
+
         out[:, 2] = out[:, 0] * (1 - prior_enemy) + out[:, 1] * prior_enemy
         return out
-    
+
     def get_vegas_raw_dist(self):
         import math
         dist = np.zeros(self.n_actions)
@@ -585,8 +621,8 @@ class NeuralAgent(AbstractAgent):
                      / (self.v_bandit_dict[bnd]['win'] + self.v_bandit_dict[bnd]['loss'] + self.v_bandit_dict[bnd]['opp']) \
                     * math.pow(0.97, self.v_bandit_dict[bnd]['win'] + self.v_bandit_dict[bnd]['loss'] + self.v_bandit_dict[bnd]['opp'])
         return dist
-    
-    
+
+
     def update_vegas(self, action, reward, rival_move):
         last_reward = reward
 
@@ -614,17 +650,17 @@ class NeuralAgent(AbstractAgent):
                 self.v_bandit_dict[op_last_action]['op_continue'] += 1
             else:
                 self.v_bandit_dict[op_last_action]['op_continue'] = 0
-                
-        
-    
+
+
+
     def get_vegas_state(self):
         return self.get_vegas_raw_dist()
-        
+
         def make_dist(v):
             binary = np.zeros(self.n_actions,dtype=float)
             binary[v] = 1.0
             return binary
-        
+
         import random
 
         my_pull = make_dist(random.randrange(self.n_actions))
@@ -651,33 +687,33 @@ class NeuralAgent(AbstractAgent):
         q = self.q + self._failures
         n = p + q
         mu = p / n
-        
+
         # bandits
         gittins = self.get_gittins()
         gittins = self.add_linear_atoms(gittins)
-        
+
         exact_gittins = self.get_exact_gittins()
         #exact_gittins = self.add_linear_atoms(exact_gittins)
-        
+
         bucb = self.get_bayesian_ucb()
-        
+
         thompson = self.get_thompson()
-        
+
         custom_ucb_bandits = self.get_custom_ucb_bandits()
-        
+
         thompson_with_decay = self.get_thompson_with_decay_my_and_rival()
-        
+
         vegas = self.get_vegas_state()
-        
+
         # stats
         prior_estimations = self.get_initial_probs_estimations()
-        
+
         total_pulls = np.ones_like(p) * self._total_pulls
-        
+
         remaining = self.horizon - total_pulls
-        
+
         remap = lambda stream : [x.reshape(-1, 1) for x in stream]
-        
+
         # history
         dense_five_last_rival_moves = np.zeros((p.shape[0], 5))
         dense_five_last_my_moves = np.zeros((p.shape[0], 5))
@@ -688,9 +724,9 @@ class NeuralAgent(AbstractAgent):
             dense_five_last_rival_moves[e[0]][i] = 1
             dense_five_last_my_moves[e[1]][i] = 1
             dense_five_last_my_rewards[e[2]][i] = 1
-        
+
         # saved : p, q, n, total_pulls, remaining, self._successes, self._failures, self._rival_moves
-        
+
         vectors = np.concatenate(remap((
             p,
             q,
@@ -705,26 +741,39 @@ class NeuralAgent(AbstractAgent):
             exact_gittins,
             thompson,
             thompson_with_decay,
-            bucb
-        )) +  
+            bucb,
+            vegas
+        )) +
             [dense_five_last_rival_moves, dense_five_last_my_moves, dense_five_last_my_rewards, custom_ucb_bandits, prior_estimations],axis=1)
-        
+
         vectors_mean = np.mean(vectors, axis=0, keepdims=True)
         vectors_mean = np.repeat(vectors_mean, vectors.shape[0],axis=0)
         if self.use_mean:
             vectors = np.concatenate([vectors, vectors - vectors_mean], axis=1)
-        
+
         baseline = gittins
         self.policy_baseline = mu
         self.vectors = vectors
         {}
 
+        if self.use_catboost:
+            out = cbmodel.predict(vectors)
+            out = torch.FloatTensor(out)
+            out += torch.rand(out.shape) * 1e-12  # random
+            probs = torch.nn.Softmax(dim=0)(out).detach().numpy().reshape(-1)
+            prediction = np.random.choice(np.arange(probs.shape[0]), 1, p=probs)[0]
+            return prediction
+
+
         vectors = torch.Tensor(vectors)
-        
+
         if self.use_feature_nagiss:
             f = nagiss_model(vectors)
             vectors = torch.cat([vectors, f], dim=1)
-        
+
+        if self.use_baseline_nagiss:
+            baseline = nagiss_model(vectors)
+
         if self.use_only_nagiss:
             out = nagiss_model(vectors)
             out += torch.rand(out.shape) * 1e-12  # random
@@ -745,13 +794,13 @@ class NeuralAgent(AbstractAgent):
             prediction = np.random.randint(out.shape[0])
         self.last_prediction = out[prediction]
         self.last_out = out
-        
+
         T_PRINT = 25
 
         if self._total_pulls == self.horizon - T_PRINT:
             from copy import deepcopy
             self.frozen = deepcopy(self.model)
-        
+
         if self.use_sep_nn and self._total_pulls >= self.horizon - T_PRINT:
             print_f = lambda x : list(x.detach().reshape(-1).numpy())
             order = 0
@@ -760,34 +809,34 @@ class NeuralAgent(AbstractAgent):
                     if self._total_pulls == self.horizon - T_PRINT + order:
                         print('layer_' + str(i) + '_' + str(j) + '_' + ','.join(map(lambda x : '%.2f' % x,np.array(print_f(x)))) + '$')
                     order += 1
-        
+
         return prediction
-    
+
     def get_features_dump(self, action):
         return self.vectors.reshape(-1)
 #         return self.vectors[action]
-    
+
     def update(self, action, reward, rival_move=None):
         super().update(action, reward, rival_move)
         self.update_vegas(action, reward, rival_move)
         self.make_update_initial_probs_estimations(action, reward, rival_move)
-        
+
         if reward > 0:
             self.thompson_state[action][0] += 1
         else:
             self.thompson_state[action][1] += self._no_reward
-            
+
         self.thompson_state[action][0] = (self.thompson_state[action][0] - 1) * (1 - self._decay) + 1
         if rival_move is not None:
             self.thompson_state[rival_move][0] = (self.thompson_state[rival_move][0] - 1) * (1 - self._decay) + 1
-        
+
         if len(self.five_last_moves_queue) >= 5:
             self.five_last_moves_queue = self.five_last_moves_queue[1:]
         self.five_last_moves_queue.append([rival_move, action, reward])
-        
-        if self.use_only_nagiss:
+
+        if self.use_only_nagiss or self.use_catboost:
             return
-        
+
         if self.use_reinforce:
             act_policy = torch.nn.Softmax(dim=0)(self.last_out)[action]
             self.log_policy_sum += torch.log(act_policy).reshape(-1)
@@ -812,10 +861,10 @@ class NeuralAgent(AbstractAgent):
             if self.not_learn:
                 return
             self.optimizer.zero_grad()
-            self.loss_sum.backward() 
+            self.loss_sum.backward()
             self.optimizer.step()
             self.loss_sum = 0
-        
+
 
 agent = NeuralAgent()
 last_bandit = None
@@ -837,5 +886,5 @@ def exec(observation, configuration):
         agent.update(last_bandit, reward, rival_move)
 
     last_bandit = int(agent.get_action())
-    
+
     return last_bandit
